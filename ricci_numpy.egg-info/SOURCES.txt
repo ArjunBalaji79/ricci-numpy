@@ -1,0 +1,13 @@
+LICENSE
+README.md
+pyproject.toml
+ricci_numpy/__init__.py
+ricci_numpy/_numba.py
+ricci_numpy/core.py
+ricci_numpy/fast.py
+ricci_numpy.egg-info/PKG-INFO
+ricci_numpy.egg-info/SOURCES.txt
+ricci_numpy.egg-info/dependency_links.txt
+ricci_numpy.egg-info/requires.txt
+ricci_numpy.egg-info/top_level.txt
+tests/test_canonical.py
