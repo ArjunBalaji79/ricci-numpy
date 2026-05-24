@@ -86,7 +86,9 @@ test cases. All three pass to machine precision (≤ 2.78 × 10⁻¹⁶).
 ```bash
 python -m ricci_numpy.core      # validate pure-numpy version
 python -m ricci_numpy._numba    # validate numba version
-pytest tests/                   # full test suite
+pytest tests/                   # full test suite (43 tests: canonical,
+                                # random-graph fuzz vs scipy LP, weighted,
+                                # disconnected, isolated nodes, edge cases)
 ```
 
 ## Benchmark
@@ -136,12 +138,22 @@ pip install ricci-numpy[dev] torch "jax[cuda12]"
 python benchmarks/bench.py --traces /path/to/cached/embeddings/
 ```
 
+## Weighted graphs
+
+Pass a `weights` matrix (same shape as A, zero off-edges, positive on edges)
+to use Floyd–Warshall shortest paths instead of unweighted BFS:
+
+```python
+W = A.astype(float)
+W[2, 3] = W[3, 2] = 5.0   # heavy edge
+kappas = rn.all_curvatures(A, weights=W)
+```
+
 ## When `ricci_numpy` is *not* the right choice
 
 - **You have very large sparse graphs (n > a few thousand).** The matrix-power
-  BFS in `shortest_paths` is O(n³). Use a sparse-graph library.
-- **You need weighted-graph shortest paths.** This package assumes unit edge
-  weights. PR welcome.
+  BFS in `shortest_paths` is O(n³); Floyd–Warshall in `shortest_paths(A, weights=W)`
+  is also O(n³). Use a sparse-graph library.
 - **You need to scale to GPU.** Use [`GraphRicciCurvature`][grc] or roll your
   own with batched Sinkhorn — but see the precision wall above.
 - **You need other curvature notions** (Forman, Bochner-Lichnerowicz, etc.).

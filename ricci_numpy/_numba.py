@@ -24,20 +24,29 @@ def adjacency(edges, n=None):
     return A
 
 
-def shortest_paths(A):
+def shortest_paths(A, weights=None):
+    """Unweighted BFS (default) or weighted Floyd–Warshall (if weights given)."""
     n = A.shape[0]
-    Ab = (A > 0).astype(int)
-    D = np.full((n, n), n, dtype=int)
-    np.fill_diagonal(D, 0)
-    reached = np.eye(n, dtype=bool)
-    frontier = Ab.astype(bool)
-    for k in range(1, n):
-        new = frontier & ~reached
-        if not new.any():
-            break
-        D[new] = k
-        reached |= new
-        frontier = (frontier.astype(int) @ Ab) > 0
+    if weights is None:
+        Ab = (A > 0).astype(int)
+        D = np.full((n, n), n, dtype=int)
+        np.fill_diagonal(D, 0)
+        reached = np.eye(n, dtype=bool)
+        frontier = Ab.astype(bool)
+        for k in range(1, n):
+            new = frontier & ~reached
+            if not new.any():
+                break
+            D[new] = k
+            reached |= new
+            frontier = (frontier.astype(int) @ Ab) > 0
+        return D
+    W = np.where((A > 0) & (np.asarray(weights) > 0),
+                 np.asarray(weights, dtype=float), np.inf)
+    np.fill_diagonal(W, 0.0)
+    D = W.copy()
+    for k in range(n):
+        D = np.minimum(D, D[:, k:k+1] + D[k:k+1, :])
     return D
 
 
@@ -212,13 +221,14 @@ def edge_curvature(u, v, D, M):
     p, q = M[u, sup], M[v, sup]
     C = D[np.ix_(sup, sup)].astype(float)
     d_uv = float(D[u, v])
-    if d_uv == 0 or d_uv >= D.shape[0]:
+    if d_uv == 0 or not np.isfinite(d_uv) or d_uv >= D.shape[0]:
         return 0.0
     return 1.0 - wasserstein(p, q, C) / d_uv
 
 
-def all_curvatures(A, alpha=0.5):
-    D, M = shortest_paths(A), lazy_walk(A, alpha)
+def all_curvatures(A, alpha=0.5, weights=None):
+    D = shortest_paths(A, weights=weights)
+    M = lazy_walk(A, alpha)
     return np.array([edge_curvature(u, v, D, M)
                      for u, v in np.argwhere(np.triu(A, 1) > 0)])
 

@@ -29,22 +29,36 @@ def adjacency(edges, n=None):
     return A
 
 
-def shortest_paths(A):
-    """All-pairs unweighted shortest paths via boolean matrix powers.
-    Unreachable pairs get distance n (treat as +inf)."""
+def shortest_paths(A, weights=None):
+    """All-pairs shortest paths.
+
+    If ``weights`` is None, uses unweighted BFS via boolean matrix powers
+    on the 0/1 adjacency A; unreachable pairs get distance n (=infinity
+    sentinel). If ``weights`` is provided (same shape as A, with 0 or
+    np.inf for non-edges and positive weights elsewhere), uses
+    Floyd–Warshall over the float weight matrix; unreachable pairs get
+    np.inf."""
     n = A.shape[0]
-    Ab = (A > 0).astype(int)
-    D = np.full((n, n), n, dtype=int)
-    np.fill_diagonal(D, 0)
-    reached = np.eye(n, dtype=bool)
-    frontier = Ab.astype(bool)
-    for k in range(1, n):
-        new = frontier & ~reached
-        if not new.any():
-            break
-        D[new] = k
-        reached |= new
-        frontier = (frontier.astype(int) @ Ab) > 0
+    if weights is None:
+        Ab = (A > 0).astype(int)
+        D = np.full((n, n), n, dtype=int)
+        np.fill_diagonal(D, 0)
+        reached = np.eye(n, dtype=bool)
+        frontier = Ab.astype(bool)
+        for k in range(1, n):
+            new = frontier & ~reached
+            if not new.any():
+                break
+            D[new] = k
+            reached |= new
+            frontier = (frontier.astype(int) @ Ab) > 0
+        return D
+    W = np.where((A > 0) & (np.asarray(weights) > 0),
+                 np.asarray(weights, dtype=float), np.inf)
+    np.fill_diagonal(W, 0.0)
+    D = W.copy()
+    for k in range(n):
+        D = np.minimum(D, D[:, k:k+1] + D[k:k+1, :])
     return D
 
 
@@ -192,19 +206,25 @@ def wasserstein(p, q, C):
 # --- curvature ---------------------------------------------------------------
 
 def edge_curvature(u, v, D, M):
-    """Ollivier–Ricci curvature on edge (u, v) given distances D, walks M."""
+    """Ollivier–Ricci curvature on edge (u, v) given distances D, walks M.
+    Returns 0.0 if u and v are disconnected (d_uv is the +inf sentinel)."""
     sup = np.flatnonzero((M[u] > 0) | (M[v] > 0))
     p, q = M[u, sup], M[v, sup]
     C = D[np.ix_(sup, sup)].astype(float)
     d_uv = float(D[u, v])
-    if d_uv == 0 or d_uv >= D.shape[0]:
+    if d_uv == 0 or not np.isfinite(d_uv) or d_uv >= D.shape[0]:
         return 0.0
     return 1.0 - wasserstein(p, q, C) / d_uv
 
 
-def all_curvatures(A, alpha=0.5):
-    """Edge curvatures in lexicographic edge order (np.argwhere(triu(A, 1)))."""
-    D, M = shortest_paths(A), lazy_walk(A, alpha)
+def all_curvatures(A, alpha=0.5, weights=None):
+    """Edge curvatures in lexicographic edge order (np.argwhere(triu(A, 1))).
+
+    If ``weights`` is None, treats A as 0/1 adjacency (unweighted). If
+    ``weights`` is provided, uses it for shortest-path distances (via
+    Floyd–Warshall); edge presence is still determined by A > 0."""
+    D = shortest_paths(A, weights=weights)
+    M = lazy_walk(A, alpha)
     return np.array([edge_curvature(u, v, D, M)
                      for u, v in np.argwhere(np.triu(A, 1) > 0)])
 
