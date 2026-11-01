@@ -10,10 +10,16 @@ network simplex (MODI). No external graph or LP library — only numpy.
 References: Ollivier (2009); Dantzig (1951) on the transportation simplex.
 """
 from __future__ import annotations
+import warnings
 import numpy as np
 
 __all__ = ["adjacency", "shortest_paths", "lazy_walk", "wasserstein",
            "edge_curvature", "all_curvatures", "curvature_features"]
+
+_MAX_ITER_MSG = ("transportation simplex stopped after max_iter={} pivots "
+                 "without reaching optimality: the returned W_1 is only an "
+                 "upper bound (curvature is underestimated). Pass a larger "
+                 "max_iter.")
 
 
 # --- graph helpers -----------------------------------------------------------
@@ -163,7 +169,11 @@ def _find_cycle(basis, i_in, j_in):
 
 
 def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
-    """Exact transportation LP via network simplex. Returns min sum(T*C)."""
+    """Exact transportation LP via network simplex.
+
+    Returns ``(cost, converged)``. ``converged`` is False if optimality was
+    not reached within ``max_iter`` pivots; ``cost`` is then the cost of a
+    feasible but non-optimal plan, i.e. an upper bound on min sum(T*C)."""
     p, q, C = np.asarray(p, float), np.asarray(q, float), np.asarray(C, float)
     m, n = len(p), len(q)
     T, basis = _northwest_corner(p, q, tol)
@@ -178,14 +188,17 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
             basis[i, j] = False
         if not added:
             break
-    for _ in range(max_iter):
+    # max_iter pivots, plus one final optimality check after the last pivot.
+    for it in range(max_iter + 1):
         u, v = _solve_duals(C, basis, m, n)
         rc = C - u[:, None] - v[None, :]
         rc_open = np.where(basis, np.inf, rc)
         flat = int(np.argmin(rc_open))
         i_in, j_in = divmod(flat, n)
         if rc_open[i_in, j_in] >= -tol:
-            return float(np.sum(T * C))
+            return float(np.sum(T * C)), True
+        if it == max_iter:
+            break
         cycle = _find_cycle(basis, i_in, j_in)
         minus = cycle[1::2]
         amts = np.array([T[i, j] for i, j in minus])
@@ -195,17 +208,24 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
             T[i, j] += amt if k % 2 == 0 else -amt
         basis[i_in, j_in] = True
         basis[minus[k_leave][0], minus[k_leave][1]] = False
-    return float(np.sum(T * C))
+    return float(np.sum(T * C)), False
 
 
-def wasserstein(p, q, C):
-    """Exact 1-Wasserstein W_1(p, q) under cost matrix C."""
-    return _transport_lp(p, q, C)
+def wasserstein(p, q, C, max_iter=5000):
+    """Exact 1-Wasserstein W_1(p, q) under cost matrix C.
+
+    Emits a RuntimeWarning if the simplex has not reached optimality after
+    ``max_iter`` pivots; the value returned is then an upper bound on W_1."""
+    cost, converged = _transport_lp(p, q, C, max_iter=max_iter)
+    if not converged:
+        warnings.warn(_MAX_ITER_MSG.format(max_iter), RuntimeWarning,
+                      stacklevel=2)
+    return cost
 
 
 # --- curvature ---------------------------------------------------------------
 
-def edge_curvature(u, v, D, M):
+def edge_curvature(u, v, D, M, max_iter=5000):
     """Ollivier–Ricci curvature on edge (u, v) given distances D, walks M.
     Returns 0.0 if u and v are disconnected (d_uv is the +inf sentinel)."""
     sup = np.flatnonzero((M[u] > 0) | (M[v] > 0))
@@ -214,18 +234,19 @@ def edge_curvature(u, v, D, M):
     d_uv = float(D[u, v])
     if d_uv == 0 or not np.isfinite(d_uv) or d_uv >= D.shape[0]:
         return 0.0
-    return 1.0 - wasserstein(p, q, C) / d_uv
+    return 1.0 - wasserstein(p, q, C, max_iter=max_iter) / d_uv
 
 
-def all_curvatures(A, alpha=0.5, weights=None):
+def all_curvatures(A, alpha=0.5, weights=None, max_iter=5000):
     """Edge curvatures in lexicographic edge order (np.argwhere(triu(A, 1))).
 
     If ``weights`` is None, treats A as 0/1 adjacency (unweighted). If
     ``weights`` is provided, uses it for shortest-path distances (via
-    Floyd–Warshall); edge presence is still determined by A > 0."""
+    Floyd–Warshall); edge presence is still determined by A > 0.
+    ``max_iter`` caps the simplex pivots per edge (see ``wasserstein``)."""
     D = shortest_paths(A, weights=weights)
     M = lazy_walk(A, alpha)
-    return np.array([edge_curvature(u, v, D, M)
+    return np.array([edge_curvature(u, v, D, M, max_iter=max_iter)
                      for u, v in np.argwhere(np.triu(A, 1) > 0)])
 
 
