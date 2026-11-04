@@ -10,8 +10,14 @@ pure-numpy version. CPU only.
 Public API mirrors ricci_pure.
 """
 from __future__ import annotations
+import warnings
 import numpy as np
 from numba import njit
+
+_MAX_ITER_MSG = ("transportation simplex stopped after max_iter={} pivots "
+                 "without reaching optimality: the returned W_1 is only an "
+                 "upper bound (curvature is underestimated). Pass a larger "
+                 "max_iter.")
 
 
 def adjacency(edges, n=None):
@@ -178,8 +184,10 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
                     basis[ii, jj] = False
             if added: break
         if not added: break
-    # MODI
-    for _ in range(max_iter):
+    # MODI: max_iter pivots, plus one final optimality check after the last.
+    # numba cannot warn, so report convergence to the Python wrapper.
+    converged = False
+    for it in range(max_iter + 1):
         u, v = _solve_duals(C, basis)
         # reduced costs (set basic to +inf so they don't get picked)
         i_in = -1; j_in = -1; best = -tol
@@ -190,6 +198,9 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
                     if rc < best:
                         best = rc; i_in = i; j_in = j
         if i_in < 0:
+            converged = True
+            break
+        if it == max_iter:
             break
         ci, cj = _find_cycle(basis, i_in, j_in)
         # leave: min T over minus-sign cells (odd indices)
@@ -208,28 +219,32 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
     for i in range(m):
         for j in range(n):
             cost += T[i, j] * C[i, j]
+    return cost, converged
+
+
+def wasserstein(p, q, C, max_iter=5000):
+    cost, converged = _transport_lp(np.asarray(p, float), np.asarray(q, float),
+                                    np.asarray(C, float), 1e-10, int(max_iter))
+    if not converged:
+        warnings.warn(_MAX_ITER_MSG.format(max_iter), RuntimeWarning,
+                      stacklevel=2)
     return cost
 
 
-def wasserstein(p, q, C):
-    return _transport_lp(np.asarray(p, float), np.asarray(q, float),
-                         np.asarray(C, float))
-
-
-def edge_curvature(u, v, D, M):
+def edge_curvature(u, v, D, M, max_iter=5000):
     sup = np.flatnonzero((M[u] > 0) | (M[v] > 0))
     p, q = M[u, sup], M[v, sup]
     C = D[np.ix_(sup, sup)].astype(float)
     d_uv = float(D[u, v])
     if d_uv == 0 or not np.isfinite(d_uv) or d_uv >= D.shape[0]:
         return 0.0
-    return 1.0 - wasserstein(p, q, C) / d_uv
+    return 1.0 - wasserstein(p, q, C, max_iter=max_iter) / d_uv
 
 
-def all_curvatures(A, alpha=0.5, weights=None):
+def all_curvatures(A, alpha=0.5, weights=None, max_iter=5000):
     D = shortest_paths(A, weights=weights)
     M = lazy_walk(A, alpha)
-    return np.array([edge_curvature(u, v, D, M)
+    return np.array([edge_curvature(u, v, D, M, max_iter=max_iter)
                      for u, v in np.argwhere(np.triu(A, 1) > 0)])
 
 
