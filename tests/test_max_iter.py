@@ -85,6 +85,34 @@ def test_default_cap_scales_and_never_drops_below_5000(impl):
 
 
 @pytest.mark.parametrize("impl", IMPLS)
+def test_scaled_default_cap_reaches_the_solver(impl, monkeypatch):
+    # 20 * (8 + 8) = 320 is below the floor, so lower the floor to make the
+    # 8 x 8 default resolve to the scaled cap.
+    module = importlib.import_module(impl.wasserstein.__module__)
+    monkeypatch.setattr(module, "_MAX_ITER_FLOOR", 0)
+    p, q, C = _problem()
+    w, warned = _solve(impl, p, q, C, None)
+    assert not warned
+    assert w == impl.wasserstein(p, q, C, max_iter=5000)
+    # Any large enough cap gives the same value on a converging problem, so
+    # make the scaled cap bind to show that it is what the solver receives.
+    monkeypatch.setattr(module, "_MAX_ITER_PER_DIM", 0)
+    w, warned = _solve(impl, p, q, C, None)
+    assert warned
+
+
+@pytest.mark.parametrize("impl", IMPLS)
+def test_all_curvatures_default_cap_message(impl, monkeypatch):
+    module = importlib.import_module(impl.wasserstein.__module__)
+    monkeypatch.setattr(module, "_MAX_ITER_FLOOR", 0)
+    monkeypatch.setattr(module, "_MAX_ITER_PER_DIM", 0)
+    A = impl.adjacency([(0, 1), (1, 2), (0, 2), (2, 3),
+                        (3, 4), (3, 5), (4, 5)])  # two triangles + bridge
+    with pytest.warns(RuntimeWarning, match="hit the default pivot cap on"):
+        impl.all_curvatures(A)
+
+
+@pytest.mark.parametrize("impl", IMPLS)
 def test_all_curvatures_warns_once_with_count(impl):
     A = impl.adjacency([(0, 1), (1, 2), (0, 2), (2, 3),
                         (3, 4), (3, 5), (4, 5)])  # two triangles + bridge
