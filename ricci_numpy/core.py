@@ -20,6 +20,22 @@ _MAX_ITER_MSG = ("transportation simplex stopped after max_iter={} pivots "
                  "without reaching optimality: the returned W_1 is only an "
                  "upper bound (curvature is underestimated). Pass a larger "
                  "max_iter.")
+_TRUNCATED_MSG = ("transportation simplex hit {} on {} of {} edges without "
+                  "reaching optimality: their W_1 is only an upper bound "
+                  "(curvature is underestimated). Pass a larger max_iter.")
+
+# Default pivot cap (max_iter=None): grows with the problem size and never
+# drops below the previous fixed default, so anything that converged before
+# takes the same pivots and returns the same value.
+_MAX_ITER_FLOOR = 5000
+_MAX_ITER_PER_DIM = 20
+
+
+def _resolve_max_iter(max_iter, m, n):
+    """Pivot cap for an m x n problem: max(5000, 20 * (m + n)) if None."""
+    if max_iter is None:
+        return max(_MAX_ITER_FLOOR, _MAX_ITER_PER_DIM * (m + n))
+    return int(max_iter)
 
 
 # --- graph helpers -----------------------------------------------------------
@@ -211,43 +227,70 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
     return float(np.sum(T * C)), False
 
 
-def wasserstein(p, q, C, max_iter=5000):
+def _wasserstein(p, q, C, max_iter):
+    """W_1 without warning: returns (cost, converged, pivot cap used)."""
+    p, q = np.asarray(p, float), np.asarray(q, float)
+    cap = _resolve_max_iter(max_iter, len(p), len(q))
+    cost, converged = _transport_lp(p, q, C, max_iter=cap)
+    return cost, converged, cap
+
+
+def wasserstein(p, q, C, max_iter=None):
     """Exact 1-Wasserstein W_1(p, q) under cost matrix C.
 
-    Emits a RuntimeWarning if the simplex has not reached optimality after
-    ``max_iter`` pivots; the value returned is then an upper bound on W_1."""
-    cost, converged = _transport_lp(p, q, C, max_iter=max_iter)
+    ``max_iter`` caps the simplex pivots; None (default) uses
+    max(5000, 20 * (m + n)) for an m x n problem. Emits a RuntimeWarning if
+    optimality is not reached within the cap; the value returned is then an
+    upper bound on W_1."""
+    cost, converged, cap = _wasserstein(p, q, C, max_iter)
     if not converged:
-        warnings.warn(_MAX_ITER_MSG.format(max_iter), RuntimeWarning,
-                      stacklevel=2)
+        warnings.warn(_MAX_ITER_MSG.format(cap), RuntimeWarning, stacklevel=2)
     return cost
 
 
 # --- curvature ---------------------------------------------------------------
 
-def edge_curvature(u, v, D, M, max_iter=5000):
-    """Ollivier–Ricci curvature on edge (u, v) given distances D, walks M.
-    Returns 0.0 if u and v are disconnected (d_uv is the +inf sentinel)."""
+def _edge_curvature(u, v, D, M, max_iter):
+    """Curvature without warning: returns (kappa, converged, pivot cap)."""
     sup = np.flatnonzero((M[u] > 0) | (M[v] > 0))
     p, q = M[u, sup], M[v, sup]
     C = D[np.ix_(sup, sup)].astype(float)
     d_uv = float(D[u, v])
     if d_uv == 0 or not np.isfinite(d_uv) or d_uv >= D.shape[0]:
-        return 0.0
-    return 1.0 - wasserstein(p, q, C, max_iter=max_iter) / d_uv
+        return 0.0, True, None
+    W, converged, cap = _wasserstein(p, q, C, max_iter)
+    return 1.0 - W / d_uv, converged, cap
 
 
-def all_curvatures(A, alpha=0.5, weights=None, max_iter=5000):
+def edge_curvature(u, v, D, M, max_iter=None):
+    """Ollivier–Ricci curvature on edge (u, v) given distances D, walks M.
+    Returns 0.0 if u and v are disconnected (d_uv is the +inf sentinel).
+    ``max_iter`` caps the simplex pivots (see ``wasserstein``)."""
+    kappa, converged, cap = _edge_curvature(u, v, D, M, max_iter)
+    if not converged:
+        warnings.warn(_MAX_ITER_MSG.format(cap), RuntimeWarning, stacklevel=2)
+    return kappa
+
+
+def all_curvatures(A, alpha=0.5, weights=None, max_iter=None):
     """Edge curvatures in lexicographic edge order (np.argwhere(triu(A, 1))).
 
     If ``weights`` is None, treats A as 0/1 adjacency (unweighted). If
     ``weights`` is provided, uses it for shortest-path distances (via
     Floyd–Warshall); edge presence is still determined by A > 0.
-    ``max_iter`` caps the simplex pivots per edge (see ``wasserstein``)."""
+    ``max_iter`` caps the simplex pivots per edge (see ``wasserstein``). If
+    any edge hits its cap, one RuntimeWarning per call reports how many."""
     D = shortest_paths(A, weights=weights)
     M = lazy_walk(A, alpha)
-    return np.array([edge_curvature(u, v, D, M, max_iter=max_iter)
-                     for u, v in np.argwhere(np.triu(A, 1) > 0)])
+    res = [_edge_curvature(u, v, D, M, max_iter)
+           for u, v in np.argwhere(np.triu(A, 1) > 0)]
+    n_truncated = sum(not converged for _, converged, _ in res)
+    if n_truncated:
+        cap = ("the default pivot cap" if max_iter is None
+               else f"max_iter={max_iter}")
+        warnings.warn(_TRUNCATED_MSG.format(cap, n_truncated, len(res)),
+                      RuntimeWarning, stacklevel=2)
+    return np.array([kappa for kappa, _, _ in res])
 
 
 def curvature_features(kappas, threshold_neg=-0.05):

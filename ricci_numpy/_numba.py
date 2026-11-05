@@ -18,6 +18,21 @@ _MAX_ITER_MSG = ("transportation simplex stopped after max_iter={} pivots "
                  "without reaching optimality: the returned W_1 is only an "
                  "upper bound (curvature is underestimated). Pass a larger "
                  "max_iter.")
+_TRUNCATED_MSG = ("transportation simplex hit {} on {} of {} edges without "
+                  "reaching optimality: their W_1 is only an upper bound "
+                  "(curvature is underestimated). Pass a larger max_iter.")
+
+# Default pivot cap (max_iter=None): grows with the problem size and never
+# drops below the previous fixed default, so anything that converged before
+# takes the same pivots and returns the same value.
+_MAX_ITER_FLOOR = 5000
+_MAX_ITER_PER_DIM = 20
+
+
+def _resolve_max_iter(max_iter, m, n):
+    if max_iter is None:
+        return max(_MAX_ITER_FLOOR, _MAX_ITER_PER_DIM * (m + n))
+    return int(max_iter)
 
 
 def adjacency(edges, n=None):
@@ -222,30 +237,52 @@ def _transport_lp(p, q, C, tol=1e-10, max_iter=5000):
     return cost, converged
 
 
-def wasserstein(p, q, C, max_iter=5000):
-    cost, converged = _transport_lp(np.asarray(p, float), np.asarray(q, float),
-                                    np.asarray(C, float), 1e-10, int(max_iter))
+def _wasserstein(p, q, C, max_iter):
+    """W_1 without warning: returns (cost, converged, pivot cap used)."""
+    p, q = np.asarray(p, float), np.asarray(q, float)
+    cap = _resolve_max_iter(max_iter, len(p), len(q))
+    cost, converged = _transport_lp(p, q, np.asarray(C, float), 1e-10, cap)
+    return cost, converged, cap
+
+
+def wasserstein(p, q, C, max_iter=None):
+    cost, converged, cap = _wasserstein(p, q, C, max_iter)
     if not converged:
-        warnings.warn(_MAX_ITER_MSG.format(max_iter), RuntimeWarning,
-                      stacklevel=2)
+        warnings.warn(_MAX_ITER_MSG.format(cap), RuntimeWarning, stacklevel=2)
     return cost
 
 
-def edge_curvature(u, v, D, M, max_iter=5000):
+def _edge_curvature(u, v, D, M, max_iter):
+    """Curvature without warning: returns (kappa, converged, pivot cap)."""
     sup = np.flatnonzero((M[u] > 0) | (M[v] > 0))
     p, q = M[u, sup], M[v, sup]
     C = D[np.ix_(sup, sup)].astype(float)
     d_uv = float(D[u, v])
     if d_uv == 0 or not np.isfinite(d_uv) or d_uv >= D.shape[0]:
-        return 0.0
-    return 1.0 - wasserstein(p, q, C, max_iter=max_iter) / d_uv
+        return 0.0, True, None
+    W, converged, cap = _wasserstein(p, q, C, max_iter)
+    return 1.0 - W / d_uv, converged, cap
 
 
-def all_curvatures(A, alpha=0.5, weights=None, max_iter=5000):
+def edge_curvature(u, v, D, M, max_iter=None):
+    kappa, converged, cap = _edge_curvature(u, v, D, M, max_iter)
+    if not converged:
+        warnings.warn(_MAX_ITER_MSG.format(cap), RuntimeWarning, stacklevel=2)
+    return kappa
+
+
+def all_curvatures(A, alpha=0.5, weights=None, max_iter=None):
     D = shortest_paths(A, weights=weights)
     M = lazy_walk(A, alpha)
-    return np.array([edge_curvature(u, v, D, M, max_iter=max_iter)
-                     for u, v in np.argwhere(np.triu(A, 1) > 0)])
+    res = [_edge_curvature(u, v, D, M, max_iter)
+           for u, v in np.argwhere(np.triu(A, 1) > 0)]
+    n_truncated = sum(not converged for _, converged, _ in res)
+    if n_truncated:
+        cap = ("the default pivot cap" if max_iter is None
+               else f"max_iter={max_iter}")
+        warnings.warn(_TRUNCATED_MSG.format(cap, n_truncated, len(res)),
+                      RuntimeWarning, stacklevel=2)
+    return np.array([kappa for kappa, _, _ in res])
 
 
 def curvature_features(kappas, threshold_neg=-0.05):
